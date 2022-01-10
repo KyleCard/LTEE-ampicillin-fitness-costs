@@ -1,0 +1,17 @@
+strain,background,MIC_parent,MIC_daughter
+KJC108,Ancestor,2,2
+KJC109,Ancestor,2,4
+KJC110,Ancestor,2,2
+KJC111,Ancestor,2,4
+KJC112,Ara+4,0.5,2
+KJC113,Ara+5,1,2
+KJC114,Ara-5,1,2
+KJC115,Ara-6,0.25,1
+KJC120,Ara+4,0.25,2
+KJC121,Ara+5,1,2
+KJC122,Ara-5,1,4
+KJC123,Ara-6,0.25,1
+KJC128,Ara+4,1,2
+KJC129,Ara+5,1,2
+KJC130,Ara-5,1,2
+KJC131,Ara-6,0.25,1

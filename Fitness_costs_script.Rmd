@@ -1,0 +1,237 @@
+---
+title: "Jordan et al. (2022) R Analysis Notebook"
+output: html_notebook
+---
+
+```{r Required libraries}
+library(tidyverse)
+library(agricolae)
+library(ggpubr)
+library(cowplot)
+```
+<br>
+
+```{r Load in data}
+counts_df <- read_csv("competition_data.csv")
+counts_df$paired_ID <- as.character(counts_df$paired_ID)
+strain_MICs_df <- read_csv("AMP_strains_MICs.csv") # MIC data from Card et al. 2019
+```
+<br>
+
+```{r Data wrangling}
+fitness_df <- counts_df %>%
+  filter(!comp1_d3 < 1) %>% # Removes one of the KJC128 replicates because we did not observe it on the competition plates by day 3
+  mutate(malth_comp1 = log(comp1_d3 * (100^3) / comp1_d0)) %>%
+  mutate(malth_comp2 = log(comp2_d3 * (100^3) / comp2_d0)) %>% 
+  mutate(relative_fitness = malth_comp1 / malth_comp2) %>% 
+  select(!c(antibiotic, competitor_2, comp1_d0:comp2_d3, malth_comp1, malth_comp2))
+
+CompareFitness <- function(dat) {
+  fitness_vec <- c()
+  
+  for (i in unique(dat$block)) {
+    block_frame <- dat %>% 
+      filter(block == i)
+    
+    for (j in unique(block_frame$paired_ID)) {
+      paired_frame <- block_frame %>% 
+        filter(paired_ID == j)
+      
+      true_fitness <- paired_frame[1, 6] / paired_frame[2, 6]
+
+      fitness_vec <- bind_rows(fitness_vec, true_fitness)
+    }
+  }
+  return(fitness_vec)
+}
+
+# Normalizes relative fitness based upon common competitor values
+normalized_fitness_col <- CompareFitness(fitness_df) %>% 
+  drop_na %>% 
+  transmute(ln_relative_fitness = log(relative_fitness)) # Log(e) transform the relative fitness values
+
+fitness_df <- fitness_df %>%
+  drop_na %>%
+  bind_cols(., normalized_fitness_col) %>% 
+  select(!paired_ID:relative_fitness) %>% 
+  rename(strain = competitor_1)
+
+fitness_df$background <- as.factor(fitness_df$background)
+fitness_df$strain <- as.factor(fitness_df$strain)
+
+# Creates new data frame with average fitness and number of replicates for each strain
+JoinedDF <- function(dat) {
+  mean_sd_df <- dat %>%
+    group_by(strain) %>% 
+    summarize(average = mean(ln_relative_fitness))
+    
+  replicates_df <- dat %>% 
+    group_by(strain) %>% 
+    count()
+    
+  joined_df <- left_join(mean_sd_df, replicates_df, by = "strain")
+}
+
+joined_df <- JoinedDF(fitness_df)
+
+# Creates a data frame with summary statistics  
+strain_vec <- c("KJC108", "KJC109", "KJC110", "KJC111", "KJC112", "KJC113", "KJC114", "KJC115", "KJC120", "KJC121", "KJC122", "KJC123", "KJC128", "KJC129", "KJC130", "KJC131")
+
+SummaryStats <- function(dat, strains) {
+  strain_frame <- dat %>% 
+    filter(strain == strains)
+  
+  if (strain_frame$n == 5) {
+    mutated_frame <- strain_frame %>%
+      mutate(lower_CI = average - (2.776 * (sqrt(0.00441) / sqrt(n)))) %>%  # Error bars calculated using the t-distribution, 4 d.f., and pooled SD estimated from ANOVA.
+      mutate(upper_CI = average + (2.776 * (sqrt(0.00441) / sqrt(n))))
+  } else {
+    mutated_frame <- strain_frame %>%
+      mutate(lower_CI = average - (3.182 * (sqrt(0.00441) / sqrt(n)))) %>%  # Error bars calculated using the t-distribution, 3 d.f., and pooled SD estimated from ANOVA.
+      mutate(upper_CI = average + (3.182 * (sqrt(0.00441) / sqrt(n))))
+  }
+  return(mutated_frame)
+}
+
+summary_stats_df <- map_df(strain_vec, ~SummaryStats(joined_df, .x))
+```
+<br>
+
+**Analyses**
+
+One-sample t-test of average fitness costs of resistant lines
+```{r Average fitness cost}
+t.test(summary_stats_df$average, mu = 0, alternative = "less")
+```
+<br>
+
+ANOVA tests of fitness differences among strains
+```{r Test for significant variation among lines}
+FitnessAnova <- function(dat, tukey = FALSE) {
+    aov <- aov(ln_relative_fitness ~ strain, data = dat)
+    
+    if (tukey == FALSE) {
+      return(summary(aov))
+    }
+    else {
+      return(aov)
+      }
+    }
+
+FitnessAnova(fitness_df)
+```
+<br>
+
+More data wrangling - Merge summary stats with MIC values from Card et al. 2019
+```{r Yet more data wrangling}
+combined_df <- strain_MICs_df %>%
+  left_join(summary_stats_df, strain_MICs_df, by = "strain") %>%
+  mutate(MIC_parent = log2(MIC_parent)) %>% 
+  mutate(MIC_daughter = log2(MIC_daughter)) %>% 
+  mutate(fold_change = (MIC_daughter - MIC_parent))
+```
+<br>
+
+Correlations between strain fitness and MIC
+```{r Correlation between fitness and MIC}
+cor.test(combined_df$average, combined_df$MIC_daughter, alternative = "two.sided")
+```
+<br>
+
+Correlations between strain fitness and level of resistance conferred by mutation
+```{r Correlation between fold-change in resistance and MIC}
+cor.test(combined_df$average, combined_df$fold_change, alternative = "two.sided")
+```
+<br>
+
+ANOVA to test for main effect of genetic background on average fitness costs
+```{r Test for effect of background on fitness costs}
+aov(average ~ background, data = combined_df) %>% summary()
+```
+<br>
+
+ANOVA to test for possible interaction between genetic background and MIC on average fitness costs
+```{r Test for interaction effects}
+aov(average ~ background * MIC_daughter, data = combined_df) %>% summary()
+```
+<br>
+
+Compare resistant lines with single mutations against lines with multiple mutations (i.e., hitchhiking hypothesis)
+```{r Test for genetic-hitchhiking effects}
+avg_fitness_mult_df <- combined_df %>% 
+  filter(strain %in% c("KJC109", "KJC114"))
+
+avg_fitness_single_df <- anti_join(combined_df, avg_fitness_mult_df)
+
+mean(avg_fitness_single_df$average)
+mean(avg_fitness_mult_df$average)
+
+t.test(avg_fitness_single_df$average, avg_fitness_mult_df$average, alternative = "greater")
+```
+<br>
+
+
+Tukey test
+```{r Post-hoc test}
+tukey_test <- FitnessAnova(fitness_df, tukey = TRUE) %>% 
+  HSD.test(., trt = "strain")
+
+tukey_groups <- data.frame(group = c("ef", "bcd", "cde", "ef", "ab", "ab", "ab", "def", "ef", "ef", "a", "f", "ef", "abc", "f", "ef"))
+combined_df <- bind_cols(combined_df, tukey_groups)
+```
+<br>
+
+
+**Visualizations of the data**
+
+```{r Correlation plots}
+fitness_versus_MIC_plot <- combined_df %>% 
+  ggplot(aes(x = MIC_daughter, y = average)) +
+    geom_point(size = 2) +
+    geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "black") +
+    stat_cor(method = "pearson", cor.coef.name = "r", digits = 4, label.x = 0.9, label.y = -0.08, geom = "text", size = 5) +
+    scale_x_continuous(limits = c(0, 2), breaks = c(0, 1, 2)) +
+    labs(y = "Log"[e]~"relative fitness", x = "Log"[2]~"MIC") +
+    theme_cowplot()
+
+fitness_versus_foldMIC_plot <- combined_df %>% 
+  ggplot(aes(x = fold_change, y = average)) +
+    geom_point(size = 2) +
+    geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "black", size = 1) +
+    stat_cor(method = "pearson", cor.coef.name = "r", digits = 4, label.x = 1.4, label.y = -0.08, geom = "text", size = 5) +
+    scale_x_continuous(limits = c(0, 3), breaks = c(0, 1, 2, 3)) +
+    labs(y = "Log"[e]~"relative fitness", x = "Log"[2]~"fold-increase in MIC") +
+    theme_cowplot() +
+    theme(axis.title.y = element_text(color = "white"),
+        axis.text.y = element_text(color = "white"),
+        axis.ticks.y = element_blank())
+
+corr_plot <- plot_grid(fitness_versus_MIC_plot, fitness_versus_foldMIC_plot,
+                       labels = "AUTO")
+
+corr_plot
+
+# ggsave("corr_plot.pdf", corr_plot, path = "Figures", device = "pdf", width = 10, height = 6, units = "in")
+# ggsave("corr_plot.png", corr_plot, path = "Figures", device = "png", width = 10, height = 6, units = "in")
+```
+<br>
+
+```{r Average fitness plot}
+avg_fitness_plot <- combined_df %>% 
+  ggplot(aes(x = strain, y = average)) +
+    geom_point(aes(x = reorder(strain, average) , y = average), size = 3) +
+    geom_errorbar(aes(ymin = lower_CI, ymax = upper_CI), width = 0.3) +
+    geom_text(aes(label = group), vjust = -7) +
+    scale_y_continuous(limits = c(-0.5, 0.2), breaks = c(-0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2)) +
+    scale_x_discrete(labels = c("Ara\u20135-2", "Ara\u20135-1", "Ara+5-1", "Ara+4-1", "Ara+5-3", "Ancestor-2", "Ancestor-3", "Ara\u20136-1", "Ancestor-4",
+                                "Ara+4-2", "Ara+4-3", "Ara\u20136-3", "Ancestor-1", "Ara+5-2", "Ara\u20135-3", "Ara\u20136-2")) +
+    labs(y = expression("Log"[e]~"relative fitness")) +
+    theme_cowplot() +
+    theme(axis.title.x = element_blank(),
+          axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+avg_fitness_plot
+
+# ggsave("avg_fitness_plot.pdf", avg_fitness_plot, path = "Figures", device = "pdf", width = 10, height = 6, units = "in")
+# ggsave("avg_fitness_plot.png", avg_fitness_plot, path = "Figures", device = "png", width = 10, height = 6, units = "in")
+```
